@@ -307,17 +307,6 @@ jobs:
         with:
           tag_name: ${{ steps.compute_tag.outputs.release_tag }}
           name: ${{ github.event.inputs.releaseTitle != '' && github.event.inputs.releaseTitle || format('AAPS {0} · build {1} (signed)', env.VERSION, env.BUILD_TS) }}
-          body: |
-            ${{ github.event.inputs.releaseBody != '' && github.event.inputs.releaseBody
-              || format(
-                   '## ✅ 本 Release 包含的 APK 已用您的发布证书 **自动签名**（CI 端完成），可 **直接安装** 到 Android。\n\n'
-                   + '### 构建信息\n\n- Variant: `{1}`\n- Version: `{2}`\n- Flavor suffix: `{3}`\n- Built at: `{0}`\n\n'
-                   + '### 📥 直接下载（永久直链，可用于 App Update Checker）\n\n'
-                   + '- Phone APK: [`{4}`]({5})\n- Wear APK（如有）: `aaps-wear-{2}{3}.apk`\n',
-                   github.server_date, github.event.inputs.buildVariant, env.VERSION, env.VERSION_SUFFIX,
-                   steps.rename_apks.outputs.download_name, steps.compute_tag.outputs.download_url
-                 )
-            }}
           draft: false
           prerelease: ${{ contains(github.event.inputs.buildVariant, 'Debug') }}
           files: |

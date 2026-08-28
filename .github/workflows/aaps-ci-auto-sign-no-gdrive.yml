@@ -1,4 +1,4 @@
-name: AAPS auto ci
+name: AAPS CI (CI 自动签名 / 无谷歌网盘 / 触发时零手填签名参数)
 
 # =========================================================================================================
 #  用户 2026-08-28 新要求落地：
@@ -307,6 +307,7 @@ jobs:
         with:
           tag_name: ${{ steps.compute_tag.outputs.release_tag }}
           name: ${{ github.event.inputs.releaseTitle != '' && github.event.inputs.releaseTitle || format('AAPS {0} · build {1} (signed)', env.VERSION, env.BUILD_TS) }}
+          
           draft: false
           prerelease: ${{ contains(github.event.inputs.buildVariant, 'Debug') }}
           files: |

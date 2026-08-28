@@ -267,7 +267,7 @@ jobs:
              echo "::error::APK并没有被签名 (可能 flavor/buildType 组合下 signingConfig 没被注入)"
              exit 6
            fi
-         shell: bash      
+        shell: bash      
 
 
       # ====================================================================

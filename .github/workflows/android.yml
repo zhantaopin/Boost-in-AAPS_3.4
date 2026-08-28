@@ -1,5 +1,4 @@
 name: AAPS CI (CI 自动签名 / 无谷歌网盘 / 触发时零手填签名参数)
-
 # =========================================================================================================
 #  用户 2026-08-28 新要求落地：
 #   1) CI 里自动完成 keystore 解码 + jarsigner 可用性校验 + Gradle 注入签名参数 + apksigner 出 signed APK
@@ -104,6 +103,241 @@ jobs:
           echo "✅ 签名参数 4 段全部就绪（已 mask，不会出现在日志）"
 
       # ====================================================================
+      # 2. 解码出真实 keystore.jks 到 Runner 临时目录
+      # ====================================================================
+      - name: 🗝️ Materialize keystore.jks on runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/keystore/keystore.jks"
+          ls -lh "$RUNNER_TEMP/keystore/keystore.jks"
+          # 基础 sanity：keytool 能读吗？（只读列表，不打印密码）
+          SANITY=$(mktemp)
+          if keytool -list -keystore "$RUNNER_TEMP/keystore/keystore.jks" -storepass "$KEYSTORE_PASSWORD" > "$SANITY" 2>&1; then
+            echo "✅ keystore 文件可读取"
+          else
+            echo "❌ keystore 损坏或 storePassword 不正确；下面是 keytool 输出："
+            cat "$SANITY"
+            rm -f "$SANITY"
+            exit 3
+          fi
+          rm -f "$SANITY"
+
+      # ====================================================================
+      # 3. 用 jarsigner + dummy.jar 验证 (storePassword, alias, keyPassword) 三者组合
+      # ====================================================================
+      - name: ✅ Validate keystore / alias / passwords
+        run: |
+          set -x
+          echo "test" > dummy.txt
+          zip -q dummy.jar dummy.txt
+          rm dummy.txt
+          JARSIGNER_LOG=$(mktemp)
+          if ! jarsigner \
+                -keystore "$RUNNER_TEMP/keystore/keystore.jks" \
+                -storepass "$KEYSTORE_PASSWORD" \
+                -keypass  "$KEY_PASSWORD" \
+                dummy.jar "$KEY_ALIAS" > "$JARSIGNER_LOG" 2>&1; then
+            echo "❌ jarsigner 校验失败（store密码、key密码、alias三者至少有一个不对）"
+            echo "🔍 jarsigner 错误输出："
+            cat "$JARSIGNER_LOG"
+            rm -f "$JARSIGNER_LOG" dummy.jar
+            exit 4
+          fi
+          rm -f "$JARSIGNER_LOG" dummy.jar
+          echo "✅ 签名三元组（storePassword/alias/keyPassword）100% 正确"
+
+      # ====================================================================
+      # 4. 拉源码 + 构建环境准备
+      # ====================================================================
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set build variant + version suffix metadata
+        run: |
+          BUILD_VARIANT="${{ github.event.inputs.buildVariant }}"
+          echo "BUILD_VARIANT=$BUILD_VARIANT" >> "$GITHUB_ENV"
+          VARIANT_FLAVOR=$(echo "$BUILD_VARIANT" | sed -E 's/(Release|Debug)$//' | tr '[:upper:]' '[:lower:]')
+          VARIANT_TYPE=$(echo "$BUILD_VARIANT"  | grep -oE '(Release|Debug)$' | tr '[:upper:]' '[:lower:]')
+          echo "VARIANT_FLAVOR=$VARIANT_FLAVOR" >> "$GITHUB_ENV"
+          echo "VARIANT_TYPE=$VARIANT_TYPE"  >> "$GITHUB_ENV"
+          VERSION_SUFFIX=""
+          if [[ "$VARIANT_FLAVOR" != "full" ]]; then VERSION_SUFFIX="$VARIANT_FLAVOR"; fi
+          if [[ "$VARIANT_TYPE"   == "debug" ]]; then VERSION_SUFFIX="$VERSION_SUFFIX-debug"; fi
+          if [[ -n "$VERSION_SUFFIX" && "$VERSION_SUFFIX" != -* ]]; then VERSION_SUFFIX="-$VERSION_SUFFIX"; fi
+          echo "VERSION_SUFFIX=$VERSION_SUFFIX" >> "$GITHUB_ENV"
+
+      - name: Extract VERSION + BUILD_TS
+        id: extract_version
+        run: |
+          BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+          if echo "$BRANCH_NAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            VERSION="$BRANCH_NAME"
+          else
+            VERSION=$(grep 'val appVersion' buildSrc/src/main/kotlin/Versions.kt | awk -F '"' '{print $2}')
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          TS=$(date -u +%Y%m%d-%H%M)
+          echo "BUILD_TS=$TS" >> "$GITHUB_ENV"
+          echo "build_ts=$TS" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: chmod +x gradlew
+        run: chmod +x gradlew
+
+      # ====================================================================
+      # 5. 构建 APK（通过 4 条 -Pandroid.injected.signing.* 参数注入签名，
+      #    AGP 会自动用它们完成 signing，不依赖工程里 keystore.properties，所以源码零修改）
+      # ====================================================================
+      - name: 🔨 Build SIGNED APK (Gradle with injected signing)
+        run: |
+          ./gradlew :app:assemble${{ env.BUILD_VARIANT }} :wear:assemble${{ env.BUILD_VARIANT }} \
+            -Dorg.gradle.jvmargs="-Xmx8g -XX:+UseParallelGC -Xss1024m" \
+            -Dkotlin.daemon.jvm.options="-Xmx2g" \
+            -Dkotlin.compiler.execution.strategy="in-process" \
+            -Dorg.gradle.daemon=true \
+            -Dorg.gradle.workers.max=8 \
+            -Dorg.gradle.caching=true \
+            -Pandroid.injected.signing.store.file="$RUNNER_TEMP/keystore/keystore.jks" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+
+      # ====================================================================
+      # 6. 重命名 APK（已签名，不再加 -unsigned 后缀；Debug build 文件名依然保留 -debug）
+      # ====================================================================
+      - name: Rename signed APKs
+        id: rename_apks
+        run: |
+          PHONE_DIR="app/build/outputs/apk/${{ env.VARIANT_FLAVOR }}/${{ env.VARIANT_TYPE }}"
+          WEAR_DIR="wear/build/outputs/apk/${{ env.VARIANT_FLAVOR }}/${{ env.VARIANT_TYPE }}"
+
+          PHONE_APK_ORIG=$(find "$PHONE_DIR" -maxdepth 1 -name "*.apk" | head -1)
+          WEAR_APK_ORIG=$(find  "$WEAR_DIR"  -maxdepth 1 -name "*.apk" 2>/dev/null | head -1)
+
+          if [ -z "$PHONE_APK_ORIG" ]; then
+            echo "❌ 构建结束但没找到手机 APK？检查上一步 gradlew assemble 输出"
+            ls -la "$PHONE_DIR" 2>/dev/null || true
+            exit 5
+          fi
+
+          BASE="aaps-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}"
+          BASE_WEAR="aaps-wear-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}"
+          OUT_PHONE="${BASE}.apk"
+          OUT_WEAR="${BASE_WEAR}.apk"
+
+          mv "$PHONE_APK_ORIG" "$OUT_PHONE"
+          ls -lh "$OUT_PHONE"
+
+          echo "phone_apk=$OUT_PHONE" >> "$GITHUB_OUTPUT"
+          DOWNLOAD_NAME="$OUT_PHONE"
+          echo "download_name=$DOWNLOAD_NAME" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$WEAR_APK_ORIG" ]; then
+            mv "$WEAR_APK_ORIG" "$OUT_WEAR"
+            ls -lh "$OUT_WEAR"
+            echo "wear_apk=$OUT_WEAR" >> "$GITHUB_OUTPUT"
+          else
+            echo "ℹ️ wear APK 不存在（此 flavor 可能没有 wear 模块）"
+            echo "wear_apk=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ====================================================================
+      # 7. apksigner verify（关键：确认 CI 签出来的 APK 真是 v2/v3 signed，装手机不翻车）
+      # ====================================================================
+      - name: apksigner verify on built APK (ensure real signed, not unsigned)
+        run: |
+           # 查找系统内apksigner完整路径
+           APKSIGNER=$(find $ANDROID_HOME/build-tools -name "apksigner" -type f | sort | tail -1)
+           if [[ -z "$APKSIGNER" ]];then
+             echo "::warning::未找到apksigner，跳过签名校验步骤"
+             exit 0
+           fi
+           echo "使用apksigner路径: $APKSIGNER"
+           VER=$($APKSIGNER verify --verbose "${{ steps.rename_apks.outputs.phone_apk }}" || true)
+           echo "$VER"
+           if echo "$VER" | grep -q "NO_SIGNATURE";then
+             echo "::error::APK并没有被签名 (可能 flavor/buildType 组合下 signingConfig 没被注入)"
+             exit 6
+           fi
+        shell: bash
+
+      # ====================================================================
+      # 8. Upload Artifacts（默认开）
+      # ====================================================================
+      - name: 📦 Upload SIGNED APK → Actions Artifacts
+        if: github.event.inputs.uploadArtifact == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AAPS-signed-${{ env.VARIANT_FLAVOR }}${{ env.VERSION_SUFFIX }}-${{ env.VERSION }}-${{ env.BUILD_TS }}
+          path: |
+            ${{ steps.rename_apks.outputs.phone_apk }}
+            ${{ steps.rename_apks.outputs.wear_apk }}
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 90
+
+      # ====================================================================
+      # 9. GitHub Release Assets（可选，永久直链，移除会报错的format body）
+      # ====================================================================
+      - name: 🏷️ Compute Release Tag
+        id: compute_tag
+        if: github.event.inputs.createGitHubRelease == 'true'
+        run: |
+          CUSTOM="${{ github.event.inputs.releaseTagName }}"
+          if [ -n "$CUSTOM" ]; then
+            TAG="$CUSTOM"
+          else
+            TAG="v${{ env.VERSION }}-${{ env.BUILD_TS }}"
+          fi
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "TAG = $TAG"
+          REPO="${GITHUB_REPOSITORY}"
+          URL="https://github.com/${REPO}/releases/download/${TAG}/${{ steps.rename_apks.outputs.download_name }}"
+          echo "download_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: 🚀 Publish GitHub Release with SIGNED APK (direct download links)
+        id: gh_release
+        if: github.event.inputs.createGitHubRelease == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.compute_tag.outputs.release_tag }}
+          name: ${{ github.event.inputs.releaseTitle != '' && github.event.inputs.releaseTitle || format('AAPS {0} · build {1} (signed)', env.VERSION, env.BUILD_TS) }}
+          draft: false
+          prerelease: ${{ contains(github.event.inputs.buildVariant, 'Debug') }}
+          files: |
+            ${{ steps.rename_apks.outputs.phone_apk }}
+            ${{ steps.rename_apks.outputs.wear_apk }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ====================================================================
+      # 10. 最终输出：告诉用户下载位置、强调"可直接安装，不用再自己签名了"
+      # ====================================================================
+      - name: 📋 Result summary (signed APK, direct install)
+        run: |
+          echo "=========================================================="
+          echo " ✅ CI 构建并自动签名完成（已通过 apksigner verify 校验）"
+          echo " 下载后直接 adb install / 传到手机点击安装，**不用再自己签名**。"
+          echo "=========================================================="
+          echo
+          if [ "${{ github.event.inputs.uploadArtifact }}" = "true" ]; then
+            echo " [日常用 · Actions Artifacts] 运行页底部 Artifacts 栏直接下载："
+            echo "   👉 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          if [ "${{ github.event.inputs.createGitHubRelease }}" = "true" ]; then
+            echo
+            echo " [发布用 · GitHub Release 永久直链]："
+            echo "   手机 APK 直链：${{ steps.compute_tag.outputs.download_url }}"
+            echo "   Release 页：${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.compute_tag.outputs.release_tag }}"
+          fi
       # 2. 解码出真实 keystore.jks 到 Runner 临时目录
       # ====================================================================
       - name: 🗝️ Materialize keystore.jks on runner

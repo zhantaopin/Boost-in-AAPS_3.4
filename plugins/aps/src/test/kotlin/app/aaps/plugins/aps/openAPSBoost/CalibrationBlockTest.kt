@@ -7,12 +7,16 @@ import app.aaps.core.interfaces.profiling.Profiler
 import app.aaps.core.interfaces.stats.TddCalculator
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.rx.events.EventCalibrationDetected
+import app.aaps.core.keys.StringKey
+import app.aaps.plugins.aps.openAPSBoostV5.OpenAPSBoostV5Plugin
 import app.aaps.plugins.aps.openAPSSMB.GlucoseStatusCalculatorSMB
 import app.aaps.shared.tests.TestBaseWithProfile
 import com.google.common.truth.Truth.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mock
+import org.mockito.kotlin.whenever
+import javax.inject.Provider
 
 /**
  * Tests the calibration SMB block behaviour of [OpenAPSBoostPlugin].
@@ -30,17 +34,32 @@ class CalibrationBlockTest : TestBaseWithProfile() {
     @Mock lateinit var uiInteraction: UiInteraction
     @Mock lateinit var profiler: Profiler
     @Mock lateinit var determineBasalBoost: DetermineBasalBoost
+    @Mock lateinit var boostRiskModel: BoostRiskModel
+    @Mock lateinit var boostMealModel: BoostMealModel
+    @Mock lateinit var boostIsfShadow: BoostIsfShadow
+    @Mock lateinit var healthConnectHrIngest: HealthConnectHrIngest
+    @Mock lateinit var healthConnectStepsIngest: HealthConnectStepsIngest
+    @Mock lateinit var boostV5Plugin: Provider<OpenAPSBoostV5Plugin>
 
     private lateinit var plugin: OpenAPSBoostPlugin
 
     @BeforeEach fun prepare() {
+        // Sleep feature reads these StringKeys in the plugin's field initialisers at construction;
+        // stub them so deserialize() gets "" (→ default state) instead of a null mock return.
+        whenever(preferences.get(StringKey.ApsBoostSleepState)).thenReturn("")
+        whenever(preferences.get(StringKey.ApsBoostSleepHistory)).thenReturn("")
+        whenever(preferences.get(StringKey.ApsBoostMealTimeHistory)).thenReturn("")
+        whenever(preferences.get(StringKey.ApsBoostDailyStepHistory)).thenReturn("")
+        whenever(preferences.get(StringKey.ApsBoostIntradayStepBank)).thenReturn("")
         plugin = OpenAPSBoostPlugin(
             aapsLogger, aapsSchedulers, rxBus, constraintChecker, rh,
             profileFunction, profileUtil, config, activePlugin,
             iobCobCalculator, hardLimits, preferences, dateUtil,
             processedTbrEbData, persistenceLayer,
             GlucoseStatusCalculatorSMB(aapsLogger, iobCobCalculator, dateUtil, decimalFormatter, deltaCalculator),
-            bgQualityCheck, uiInteraction, tddCalculator, determineBasalBoost, profiler, apsResultProvider
+            bgQualityCheck, uiInteraction, tddCalculator, determineBasalBoost,
+            boostRiskModel, boostMealModel, boostIsfShadow, profiler, apsResultProvider,
+            boostV5Plugin, healthConnectHrIngest, healthConnectStepsIngest
         )
         // Activate the RxBus subscription
         plugin.onStart()

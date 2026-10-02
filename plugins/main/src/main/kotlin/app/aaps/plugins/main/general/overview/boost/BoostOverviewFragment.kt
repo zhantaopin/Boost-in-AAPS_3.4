@@ -18,6 +18,7 @@ import app.aaps.core.data.model.RM
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.interfaces.aps.Loop
+import app.aaps.core.interfaces.aps.RT
 import app.aaps.core.interfaces.automation.Automation
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.db.PersistenceLayer
@@ -231,6 +232,7 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
         binding.panelTdd.setOnClickListener(this)
         binding.panelTarget.setOnClickListener(this)
         binding.panelActivity.setOnClickListener(this)
+        binding.sensitivityCard.setOnClickListener(this)
 
         // Pump status bar — tap to show bolus progress dialog
         binding.pumpStatusLayout.setOnClickListener(this)
@@ -769,6 +771,68 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
             }
             binding.panelTarget.contentDescription = "$targetDesc. Tap to set temporary target"
             binding.panelActivity.contentDescription = "Exercise mode: ${bs.activityDetail}. Tap for details"
+
+            // ── Sensitivity Adjustment Panel ──
+            // Shows the deviation-based sensitivity ratio, source, sparkline, and ISF effect.
+            // Reads from BoostStatus (which gets it from RT with proper fallback chain).
+            val sensRatio = bs.deviationSensRatio
+            val sensSource = bs.deviationSensSource
+            val sensClean = bs.deviationSensClean
+            val sensTotal = bs.deviationSensTotal
+
+            if (sensRatio != null && sensSource != "none") {
+                binding.sensitivityCard.visibility = android.view.View.VISIBLE
+                val ratioStr = String.format(Locale.getDefault(), "×%.2f", sensRatio)
+                binding.sensitivityRatioValue.text = ratioStr
+
+                // Colour: green near 1.0, yellow approaching cap, red at cap
+                val sensColor = when {
+                    sensRatio > 1.13 || sensRatio < 0.87 -> rh.gac(ctx, app.aaps.core.ui.R.attr.bgLow)      // red — at/near cap
+                    sensRatio > 1.05 || sensRatio < 0.95 -> rh.gac(ctx, app.aaps.core.ui.R.attr.warningColor) // yellow
+                    else                                 -> rh.gac(ctx, app.aaps.core.ui.R.attr.bgInRange)    // green — near neutral
+                }
+                binding.sensitivityRatioValue.setTextColor(sensColor)
+
+                // Source + data quality
+                val sourceStr = when (sensSource) {
+                    "deviation"    -> "deviation $sensClean/$sensTotal"
+                    "tdd_fallback" -> "TDD fallback"
+                    else           -> sensSource
+                }
+                binding.sensitivitySource.text = sourceStr
+
+                // ISF effect summary
+                val tddIsf = bs.sensNormalTarget
+                val varIsf = bs.variableSens
+                if (tddIsf > 0 && varIsf > 0) {
+                    val isfBefore = tddIsf * sensRatio  // ISF before sensitivity adjustment
+                    val unitsStr = if (profileFunction.getUnits() == GlucoseUnit.MGDL) "mg/dL/U" else "mmol/L/U"
+                    val beforeStr = if (profileFunction.getUnits() == GlucoseUnit.MGDL)
+                        String.format(Locale.getDefault(), "%.0f", isfBefore)
+                    else
+                        String.format(Locale.getDefault(), "%.1f", isfBefore / 18.0)
+                    val afterStr = if (profileFunction.getUnits() == GlucoseUnit.MGDL)
+                        String.format(Locale.getDefault(), "%.0f", tddIsf)
+                    else
+                        String.format(Locale.getDefault(), "%.1f", tddIsf / 18.0)
+                    binding.sensitivityIsfSummary.text = "ISF: $beforeStr → $afterStr $unitsStr"
+                } else {
+                    binding.sensitivityIsfSummary.text = ""
+                }
+
+                // Sparkline: build from recent RT history via processedDeviceStatusData
+                // Each character represents one 5-min cycle's ratio; we show the last ~24 chars (2h)
+                // Unicode block elements: ▁▂▃▄▅▆▇█ map to ratio 0.85..1.15
+                val sparkChars = "▁▂▃▄▅▆▇█"
+                val sparkText = StringBuilder()
+                // For now, show just the current ratio as a single-bar indicator
+                // TODO: build history from processedDeviceStatusData when available
+                val barIdx = ((sensRatio - 0.85) / (1.15 - 0.85) * (sparkChars.length - 1)).toInt().coerceIn(0, sparkChars.length - 1)
+                for (i in 0 until 24) sparkText.append(sparkChars[barIdx])  // placeholder
+                binding.sensitivitySparkline.text = sparkText.toString()
+            } else {
+                binding.sensitivityCard.visibility = android.view.View.GONE
+            }
         }
     }
 
@@ -833,6 +897,137 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
             hrGraphData.performUpdate()
         } else {
             binding.hrStepsGraphContainer.visibility = android.view.View.GONE
+        }
+
+        // ── Sensitivity ratio graph ──
+        // Computes deviation ratio directly from bucketed BG data + IOB, bypassing
+        // autosens entirely (which may be disabled). For each 5-min BG point, we
+        // compute BGI = -IOB × ISF × 5min_activity_fraction, then deviation =
+        // actual_delta - BGI. A rolling 1H window converts deviations into a ratio.
+        // This works regardless of autosens/adjustSens settings.
+        val profile = profileFunction.getProfile()
+        val bucketedData = iobCobCalculator.ads.getBucketedDataTableCopy()
+        if (bucketedData != null && bucketedData.size > 20 && profile != null) {
+            binding.sensitivityGraphContainer.visibility = android.view.View.VISIBLE
+            val sensGraph = binding.sensitivityGraph
+
+            // Build per-point deviation from bucketed BG + IOB
+            data class DevPoint(val time: Long, val deviation: Double, val absBgi: Double, val hasCob: Boolean)
+            val devPoints = mutableListOf<DevPoint>()
+            // Use the algorithm's variable_sens (DynISF-adjusted) when available.
+            // profile.getIsfMgdl() returns the STATIC profile ISF (e.g., 162 mg/dL/U)
+            // but DynISF may be using a much lower value (e.g., 50). Using the wrong
+            // ISF makes BGI 3× too large, flattening the ratio and producing spikes
+            // when IOB drops to zero. On AAPSClient this comes from NS device status.
+            val effectiveIsf = lastBoostStatus.variableSens.takeIf { it > 0 }
+                ?: profile.getIsfMgdl("SensGraph")
+
+            for (i in 1 until bucketedData.size) {
+                val bg = bucketedData[i].recalculated
+                val prevBg = bucketedData[i - 1].recalculated
+                val time = bucketedData[i].timestamp
+                if (bg <= 39 || prevBg <= 39) continue
+
+                val actualDelta = bg - prevBg  // mg/dL change in this 5-min interval
+
+                // Compute expected BG change from IOB (BGI)
+                val iobData = iobCobCalculator.calculateFromTreatmentsAndTemps(time, profile)
+                val bgi = -iobData.activity * effectiveIsf * 5.0  // activity is U/min, ISF is mg/dL/U
+                val deviation = actualDelta - bgi
+
+                // Check COB at this time (rough: any recent carbs = not clean)
+                val cobInfo = iobCobCalculator.getCobInfo("SensGraph")
+                val hasCob = cobInfo.displayCob != null && cobInfo.displayCob!! > 0.5
+
+                devPoints.add(DevPoint(time, deviation, kotlin.math.abs(bgi), hasCob))
+            }
+
+            // Compute rolling 1H deviation ratio for points in the display window
+            val windowMs = 3600_000L
+            val dataPoints = mutableListOf<com.jjoe64.graphview.series.DataPoint>()
+            val refPoints = mutableListOf<com.jjoe64.graphview.series.DataPoint>()
+            for (pt in devPoints) {
+                if (pt.time < overviewData.fromTime || pt.time > overviewData.endTime) continue
+
+                var sumDev = 0.0; var sumAbsBgi = 0.0; var nClean = 0; var nTotal = 0
+                for (wp in devPoints) {
+                    if (wp.time > pt.time) break
+                    if (wp.time < pt.time - windowMs) continue
+                    nTotal++
+                    sumAbsBgi += wp.absBgi
+                    if (!wp.hasCob) { sumDev += wp.deviation; nClean++ }
+                }
+
+                val ratio = if (nClean >= 3 && nTotal > 0) {
+                    val meanAbsBgi = sumAbsBgi / nTotal
+                    if (meanAbsBgi > 0.5) {
+                        (1.0 + (sumDev / nClean) / meanAbsBgi).coerceIn(0.5, 1.5)
+                    } else 1.0
+                } else 1.0
+
+                dataPoints.add(com.jjoe64.graphview.series.DataPoint(pt.time.toDouble(), ratio))
+                refPoints.add(com.jjoe64.graphview.series.DataPoint(pt.time.toDouble(), 1.0))
+            }
+
+            sensGraph.removeAllSeries()
+            if (dataPoints.size > 2) {
+                // Reference line at 1.0 (neutral)
+                val refSeries = com.jjoe64.graphview.series.LineGraphSeries(refPoints.toTypedArray())
+                refSeries.color = android.graphics.Color.GRAY
+                refSeries.thickness = 2
+                sensGraph.addSeries(refSeries)
+
+                // Cap lines at ±15% (the current maxPull)
+                val capHighPoints = refPoints.map { com.jjoe64.graphview.series.DataPoint(it.x, 1.15) }.toTypedArray()
+                val capLowPoints = refPoints.map { com.jjoe64.graphview.series.DataPoint(it.x, 0.85) }.toTypedArray()
+                val capHighSeries = com.jjoe64.graphview.series.LineGraphSeries(capHighPoints)
+                capHighSeries.color = android.graphics.Color.argb(80, 255, 0, 0)
+                capHighSeries.thickness = 1
+                sensGraph.addSeries(capHighSeries)
+                val capLowSeries = com.jjoe64.graphview.series.LineGraphSeries(capLowPoints)
+                capLowSeries.color = android.graphics.Color.argb(80, 255, 0, 0)
+                capLowSeries.thickness = 1
+                sensGraph.addSeries(capLowSeries)
+
+                // Deviation ratio line — colour by position relative to 1.0
+                val sensSeries = com.jjoe64.graphview.series.LineGraphSeries(dataPoints.toTypedArray())
+                sensSeries.color = rh.gac(ctx, app.aaps.core.ui.R.attr.defaultTextColor)
+                sensSeries.thickness = 4
+                sensGraph.addSeries(sensSeries)
+
+                // Configure axes
+                sensGraph.viewport.isXAxisBoundsManual = true
+                sensGraph.viewport.setMinX(overviewData.fromTime.toDouble())
+                sensGraph.viewport.setMaxX(overviewData.endTime.toDouble())
+                sensGraph.viewport.isYAxisBoundsManual = true
+                sensGraph.viewport.setMinY(0.7)
+                sensGraph.viewport.setMaxY(1.3)
+                sensGraph.gridLabelRenderer?.isHorizontalLabelsVisible = false
+                sensGraph.gridLabelRenderer?.numVerticalLabels = 3
+                sensGraph.gridLabelRenderer?.labelVerticalWidth = axisWidth
+                sensGraph.gridLabelRenderer?.gridColor = rh.gac(ctx, app.aaps.core.ui.R.attr.graphGrid)
+
+                // Now line
+                val nowSeries = com.jjoe64.graphview.series.LineGraphSeries(arrayOf(
+                    com.jjoe64.graphview.series.DataPoint(dateUtil.now().toDouble(), 0.7),
+                    com.jjoe64.graphview.series.DataPoint(dateUtil.now().toDouble(), 1.3)
+                ))
+                nowSeries.color = rh.gac(ctx, app.aaps.core.ui.R.attr.defaultTextColor)
+                nowSeries.thickness = 1
+                sensGraph.addSeries(nowSeries)
+            }
+
+            // Update label — show current 1H rolling ratio
+            val latestRatio = dataPoints.lastOrNull()?.y ?: 1.0
+            val currentDevRatio = lastBoostStatus.deviationSensRatio
+            val labelText = if (currentDevRatio != null && lastBoostStatus.deviationSensSource != "none") {
+                "Sensitivity ×${String.format(Locale.getDefault(), "%.2f", currentDevRatio)} applied (${lastBoostStatus.deviationSensSource})"
+            } else {
+                "Sensitivity ×${String.format(Locale.getDefault(), "%.2f", latestRatio)} (preview — not applied)"
+            }
+            binding.sensitivityGraphLabel.text = labelText
+        } else {
+            binding.sensitivityGraphContainer.visibility = android.view.View.GONE
         }
 
         // TalkBack
@@ -1039,6 +1234,43 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
                             "Exercise target: $exerciseTargetStr\n\n" +
                             "Profile: ${bs.profilePercentage}%\n\n" +
                             "--- Script Debug ---\n${bs.scriptDebugText.ifEmpty { "(no debug output)" }}")
+                }
+
+                R.id.sensitivityCard -> {
+                    val bs = lastBoostStatus
+                    val ratio = bs.deviationSensRatio
+                    val source = bs.deviationSensSource
+                    val clean = bs.deviationSensClean
+                    val total = bs.deviationSensTotal
+                    val tddIsf = bs.sensNormalTarget
+                    val varIsf = bs.variableSens
+                    val tddVal = bs.tddWeighted
+
+                    val details = StringBuilder()
+                    details.append("── Deviation Sensitivity ──\n\n")
+                    if (ratio != null && source != "none") {
+                        details.append("Source: $source\n")
+                        details.append("Clean entries: $clean / $total (8H window)\n")
+                        details.append("Applied ratio: ${String.format(Locale.getDefault(), "%.3f", ratio)}\n")
+                        val capStatus = when {
+                            ratio >= 1.149 -> "upper cap binding (×1.15)"
+                            ratio <= 0.851 -> "lower cap binding (×0.85)"
+                            else           -> "within bounds"
+                        }
+                        details.append("Cap status: $capStatus\n\n")
+                        details.append("── ISF Breakdown ──\n")
+                        details.append("7D TDD: ${String.format(Locale.getDefault(), "%.1f", tddVal)} U\n")
+                        details.append("TDD-derived ISF (before sens): ${String.format(Locale.getDefault(), "%.1f", tddIsf * ratio)}\n")
+                        details.append("Sensitivity adjustment: ×${String.format(Locale.getDefault(), "%.3f", ratio)}\n")
+                        details.append("Effective ISF (after sens): ${String.format(Locale.getDefault(), "%.1f", tddIsf)}\n")
+                        details.append("Variable ISF (at current BG): ${String.format(Locale.getDefault(), "%.1f", varIsf)}\n\n")
+                        details.append("Ratio > 1.0 = more resistant than expected\n")
+                        details.append("Ratio < 1.0 = more sensitive than expected")
+                    } else {
+                        details.append("Sensitivity adjustment not active.\n\n")
+                        details.append("Requires:\n• Adjust Sensitivity enabled in settings\n• Sufficient non-meal BG data in 8H window")
+                    }
+                    OKDialog.show(a, "Sensitivity Adjustment", details.toString())
                 }
 
                 // Standard AAPS buttons (from overview_buttons_layout)

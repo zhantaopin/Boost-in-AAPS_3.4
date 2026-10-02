@@ -116,6 +116,7 @@ open class OpenAPSBoostV2Plugin @Inject constructor(
     private val uiInteraction: UiInteraction,
     private val tddCalculator: TddCalculator,
     private val determineBasalBoostV2: DetermineBasalBoostV2,
+    private val boostRiskModel: app.aaps.plugins.aps.openAPSBoostV3ML.BoostRiskModel,
     private val profiler: Profiler,
     private val apsResultProvider: Provider<APSResult>
 ) : PluginBase(
@@ -127,7 +128,7 @@ open class OpenAPSBoostV2Plugin @Inject constructor(
         .shortName(R.string.boost_v2_shortname)
         .preferencesId(PluginDescription.PREFERENCE_SCREEN)
         .preferencesVisibleInSimpleMode(false)
-        .showInList { config.APS }
+        .showInList { false } // retired: superseded by Boost V6 — hidden, no longer a selectable option
         .description(R.string.description_boost_v2),
     aapsLogger, rh
 ), APS, PluginConstraints {
@@ -957,7 +958,8 @@ open class OpenAPSBoostV2Plugin @Inject constructor(
             meal_data = mealData,
             microBolusAllowed = microBolusAllowed,
             currentTime = now,
-            flatBGsDetected = flatBGsDetected
+            flatBGsDetected = flatBGsDetected,
+            riskModel = boostRiskModel
         ).also {
             val determineBasalResult = apsResultProvider.get().with(it)
             determineBasalResult.inputConstraints = inputConstraints
@@ -1108,6 +1110,8 @@ open class OpenAPSBoostV2Plugin @Inject constructor(
     // ---- Preferences screen ----
 
     override fun addPreferenceScreen(preferenceManager: PreferenceManager, parent: PreferenceScreen, context: Context, requiredKey: String?) {
+        // Risk model self-loads lazily on first predictHypoRisk() call via Context-injected
+        // BoostRiskModel; no need to drive load from settings access.
         if (requiredKey != null &&
             requiredKey != "absorption_smb_advanced" &&
             requiredKey != "boost_default_aaps_settings" &&

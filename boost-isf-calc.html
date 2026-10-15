@@ -272,22 +272,29 @@ const NS = {
     return r.json();
   },
   async fetchTreatments(base, secret, sinceMs, untilMs) {
-    const url = `${base.replace(/\/+$/, "")}/api/v1/treatments.json` +
-      `?find[created_at][$gte]=${new Date(sinceMs).toISOString()}` +
-      `&find[created_at][$lte]=${new Date(untilMs).toISOString()}` +
-      `&count=10000`;
-    return this.get(url, secret);
+    const url = `${base.replace(/\/+$/, "")}/api/v1/treatments.json?count=3000`;
+    const all = await this.get(url, secret);
+    const filtered = all.filter(t => {
+      const ts = t.mills || t.date || new Date(t.created_at).getTime();
+      return ts >= sinceMs && ts <= untilMs;
+    });
+    // 按时间升序排序（重要：parseTreatments 的 TempBasal 取消逻辑依赖顺序）
+    return filtered.sort((a, b) => {
+      const ta = a.mills || a.date || new Date(a.created_at).getTime();
+      const tb = b.mills || b.date || new Date(b.created_at).getTime();
+      return ta - tb;
+    });
   },
   async fetchProfile(base, secret) {
     const url = `${base.replace(/\/+$/, "")}/api/v1/profile.json`;
     return this.get(url, secret);
   },
   async fetchEntries(base, secret, sinceMs, untilMs) {
-    const url = `${base.replace(/\/+$/, "")}/api/v1/entries.json` +
-      `?find[date][$gte]=${sinceMs}` +
-      `&find[date][$lte]=${untilMs}` +
-      `&sort[date]=1&count=1000`;
-    return this.get(url, secret);
+    // 只取最新 50 条，默认降序
+    const url = `${base.replace(/\/+$/, "")}/api/v1/entries.json?count=50&type=sgv`;
+    const all = await this.get(url, secret);
+    // 过滤 24h 内
+    return all.filter(e => (e.date || e.mills || 0) >= sinceMs && (e.date || e.mills || 0) <= untilMs);
   },
   async fetchDeviceStatus(base, secret, sinceMs, untilMs) {
     const url = `${base.replace(/\/+$/, "")}/api/v1/devicestatus.json` +
@@ -307,40 +314,46 @@ const NS = {
  */
 
 function parseTreatments(nsTreatments) {
-  const boluses = [];     // { ts, amount }
-  const tempBasals = []; // { startTs, endTs, absoluteRate }  单位 U/hr
-  const carbs = [];       // { ts, amount }
+  const boluses = [];
+  const tempBasals = [];
+  const carbs = [];
 
   for (const t of nsTreatments) {
-    const ts = new Date(t.created_at || t.date).getTime();
-    if (isNaN(ts)) continue;
+    // 治疗时间：优先用 mills/date（泵实际执行时间），其次 created_at（写入时间）
+    const ts = t.mills || t.date
+      ? (typeof (t.mills || t.date) === 'number' ? (t.mills || t.date) : new Date(t.mills || t.date).getTime())
+      : new Date(t.created_at).getTime();
+    if (isNaN(ts) || ts <= 0) continue;
 
-    if (t.eventType === "Bolus") {
-      if (!t.insulin || t.insulin <= 0) continue;
-      // NS "Bolus" 有时是延长餐时（带 duration）
-      if (t.duration && t.duration > 0) {
-        // 延长餐时：按 duration 摊到时间轴
-        const rate = t.insulin / (t.duration / 60);  // U/hr
-        tempBasals.push({ startTs: ts, endTs: ts + t.duration * 60000, absoluteRate: rate, fromBolus: true });
-      } else {
-        boluses.push({ ts, amount: t.insulin });
-      }
-    } else if (t.eventType === "Temp Basal") {
-      if (!t.duration || t.duration <= 0) continue;
-      let absRate = t.absolute;
-      if (!absRate || absRate <= 0) {
-        // relative — 拿基础率 profile 算绝对
-        // 这里暂时留空，后面算 tick 的时候用 profile 基础率
-        // 先记录 relative，后面算
-        tempBasals.push({ startTs: ts, endTs: ts + t.duration * 60000, relativeRate: t.relative });
-      } else {
-        tempBasals.push({ startTs: ts, endTs: ts + t.duration * 60000, absoluteRate: absRate });
-      }
-    } else if (t.eventType === "Carbs") {
-      if (!t.carbs || t.carbs <= 0) continue;
-      carbs.push({ ts, amount: t.carbs });
+    const et = t.eventType || '';
+
+    // Bolus 类型：Bolus, Correction Bolus(SMB), Meal Bolus, Combo Bolus
+    if (['Bolus', 'Correction Bolus', 'Meal Bolus', 'Combo Bolus'].includes(et)) {
+      const ins = t.insulin || 0;
+      if (ins > 0) boluses.push({ ts, amount: ins });
     }
-    // 其他 eventType（Profile Switch, Note, Site Change, Sensor Change 等）忽略
+    // Temp Basal —— AAPS 每隔 5 min 发一条 NORMAL 来"覆盖"，absolute=0 是取消
+    else if (et === 'Temp Basal') {
+      const durationMs = t.durationInMilliseconds || ((t.duration || 0) * 60000);
+      if (durationMs <= 0) continue;
+      const absRate = t.absolute || 0;
+      if (absRate > 0) {
+        // 有效 TBR
+        tempBasals.push({ startTs: ts, endTs: ts + durationMs, absoluteRate: absRate });
+      } else if (absRate === 0 && tempBasals.length > 0) {
+        // NORMAL 取消：截断所有在此时刻仍在生效的 TBR
+        for (let i = tempBasals.length - 1; i >= 0; i--) {
+          if (ts >= tempBasals[i].startTs && ts < tempBasals[i].endTs) {
+            tempBasals[i].endTs = ts;
+          }
+        }
+      }
+    }
+    // Carbs
+    else if (et === 'Carbs') {
+      const c = t.carbs || 0;
+      if (c > 0) carbs.push({ ts, amount: c });
+    }
   }
   return { boluses, tempBasals, carbs };
 }
@@ -348,16 +361,16 @@ function parseTreatments(nsTreatments) {
 /*
  * 构建 basal schedule 查找函数：给定 timestamp 返回 profile 基础率 (U/hr)
  */
-function buildBasalLookup(basalSchedule /* [{start, minutes, value}] */) {
+function buildBasalLookup(basalSchedule /* [{timeAsSeconds, value}] */) {
   if (!basalSchedule || basalSchedule.length === 0) return () => 0;
-  const sched = basalSchedule.slice().sort((a, b) => a.minutes - b.minutes);
-  // AAPS 的 basal schedule 是"绝对时间点"，minutes = HH*60 + MM 从 0:00 算
+  const sched = basalSchedule.slice().sort((a, b) => (a.timeAsSeconds || a.minutes*60 || 0) - (b.timeAsSeconds || b.minutes*60 || 0));
   return (ts) => {
     const d = new Date(ts);
-    const minutesOfDay = d.getHours() * 60 + d.getMinutes();
+    const secOfDay = d.getHours()*3600 + d.getMinutes()*60 + d.getSeconds();
     let rate = 0;
     for (const e of sched) {
-      if (minutesOfDay >= e.minutes) rate = e.value;
+      const sec = e.timeAsSeconds != null ? e.timeAsSeconds : (e.minutes != null ? e.minutes*60 : 0);
+      if (secOfDay >= sec) rate = e.value;
       else break;
     }
     return rate;
@@ -583,40 +596,50 @@ function computeBoostDynIsf(opts /* = {
 function parseNsProfile(nsProfileArr) {
   if (!nsProfileArr || !Array.isArray(nsProfileArr) || nsProfileArr.length === 0) return null;
 
-  // NS /profile.json 有两种形态：旧版是数组，新版带 units
-  // 先尝试找 active profile
-  let prof = nsProfileArr.find(p => p.active) || nsProfileArr[0];
+  // NS /api/v1/profile.json 返回数组，每个元素有 defaultProfile + store 对象
+  let top = nsProfileArr[0];
+  const defaultName = top.defaultProfile;
+  const store = top.store || {};
+  let prof = defaultName && store[defaultName] ? store[defaultName] : Object.values(store)[0];
   if (!prof) return null;
 
-  // units: "mg/dl" or "mmol"
   const units = prof.units || "mg/dl";
-  const div = units === "mmol" ? 18.0 : 1.0; // 1 mmol/L ≈ 18 mg/dL
-  const scale = (v) => v ? v * div : v;
+  const scale = (v) => v != null ? v * (units === "mmol" ? 18.0 : 1.0) : null;
 
-  // basal: schedule [{start, minutes, value}]
   const basal = prof.basal || [];
+  // sens = profile ISF (mmol/U or mg/dL/U)
+  let sensSchedule = prof.sens || prof.sensitivity || prof.sensitivities || [];
+  const profileISF = sensSchedule.length > 0 ? sensSchedule[0].value : 0;
 
-  // isf/sensitivity: schedule
-  let isfSchedule = prof.sensitivity || prof.sensitivities || [];
-  const profileISF = isfSchedule.length > 0 ? isfSchedule[0].value : 0; // 简化：用第一个时段
-  // 注意：AAPS 按小时选对应时段；HTML 版本简化
-
-  // target
+  // target_high/target_low 也是 schedule
   let target = null;
-  if (prof.target_high && prof.target_low) target = (prof.target_high + prof.target_low) / 2;
+  const th = (prof.target_high && prof.target_high.length > 0) ? prof.target_high[0].value : null;
+  const tl = (prof.target_low && prof.target_low.length > 0) ? prof.target_low[0].value : null;
+  if (th != null && tl != null) target = (th + tl) / 2;
   else if (prof.target) target = prof.target;
-  if (target) target = scale(target);
 
-  // carb ratio
   const cr = (prof.carbratio && prof.carbratio.length > 0) ? prof.carbratio[0].value : 0;
+
+  // basal total per day
+  let basalTotal = 0;
+  const bs = basal.slice().sort((a,b) => (a.timeAsSeconds||0) - (b.timeAsSeconds||0));
+  for (let i = 0; i < bs.length; i++) {
+    const nextSec = (i+1 < bs.length ? (bs[i+1].timeAsSeconds||86400) : 86400);
+    const curSec = bs[i].timeAsSeconds || 0;
+    basalTotal += bs[i].value * ((nextSec - curSec) / 3600);
+  }
 
   return {
     basalSchedule: basal,
+    sensSchedule: sensSchedule,
     profileISF: scale(profileISF),
-    target,
+    profileISFRaw: profileISF,
+    target: target != null ? scale(target) : null,
+    targetRaw: target,
     carbRatio: cr,
     units,
-    basalTotalPerDay: basal.reduce((s, b) => s + b.value * (b.minutes / 60), 0), // 粗略
+    defaultProfileName: defaultName,
+    basalTotalPerDay: basalTotal,
   };
 }
 
@@ -658,22 +681,30 @@ async function fetchAll() {
     // entries 取最新 BG
     let curBg = 0;
     if (entriesRaw && entriesRaw.length > 0) {
-      const latest = entriesRaw[entriesRaw.length - 1];
-      curBg = latest.sgv || latest.mgdl || (latest.glucose && latest.units === "mmol" ? latest.glucose * 18 : latest.glucose);
+      // NS entries 默认降序，[0] 是最新
+      const latest = entriesRaw[0];
+      curBg = latest.sgv || latest.mgdl || latest.glucose || 0;
     }
-    if (profile?.units === "mmol" && curBg < 40) curBg *= 18; // 可能是 mmol 没转
-    document.getElementById("cur-bg").value = curBg.toFixed(0);
+    if (profile?.units === "mmol" && curBg > 0 && curBg < 40) curBg *= 18;
 
+    // 同步 UI 输入框
+    document.getElementById("cur-bg").value = curBg.toFixed(0);
     if (profile) {
       document.getElementById("profile-isf").value = profile.profileISF.toFixed(1);
-      document.getElementById("target-bg").value = profile.target ? profile.target.toFixed(0) : 100;
+      if (profile.target != null) {
+        document.getElementById("target-bg").value = profile.target.toFixed(0);
+        document.getElementById("dyn-target").value = profile.target.toFixed(0);
+      }
     }
 
     cachedData = {
       ...parsed,
       basalSchedule: profile?.basalSchedule || [],
+      sensSchedule: profile?.sensSchedule || [],
       profileISF: profile?.profileISF || 100,
       targetBg: profile?.target || 100,
+      dynTarget: profile?.target || 100,
+      curBg: curBg,
       units: profile?.units || "mg/dl",
     };
 
@@ -701,11 +732,12 @@ function renderProfile(profile, parsed) {
   const content = document.getElementById("profile-content");
   if (!profile) { content.innerHTML = `<div class="note">Profile 没拉到，手填吧</div>`; return; }
   const rows = [
-    ["Units", profile.units],
-    ["Profile ISF", `${round(profile.profileISF, 1)} mg/dL/U`],
-    ["Target BG", `${profile.target ? round(profile.target, 0) : "?"} mg/dL`],
+    ["Profile", profile.defaultProfileName || "-"],
+    ["Units", `${profile.units}${profile.units === 'mmol' ? '  (×18 → mg/dL)' : ''}`],
+    ["Profile ISF", `${round(profile.profileISF, 1)} mg/dL/U (raw ${round(profile.profileISFRaw, 2)} ${profile.units}/U)`],
+    ["Target BG", profile.target != null ? `${round(profile.target, 0)} mg/dL (raw ${round(profile.targetRaw, 2)} ${profile.units})` : "?"],
     ["Carb Ratio", profile.carbRatio ? `${round(profile.carbRatio, 1)} g/U` : "?"],
-    ["Basal 表 (24h 总量)", `${round(profile.basalTotalPerDay, 2)} U`],
+    ["Basal 总计/天", `${round(profile.basalTotalPerDay, 2)} U`],
     ["Bolus 14d", parsed.boluses.length + " 次"],
     ["Temp Basal 14d", parsed.tempBasals.length + " 次"],
     ["Carbs 14d", parsed.carbs.length + " 次"],
@@ -714,11 +746,16 @@ function renderProfile(profile, parsed) {
 
   // 更详细的 basal schedule
   if (profile.basalSchedule.length > 0) {
-    let tbl = `<h3>基础率表</h3><table><tr><th>开始时间</th><th>时长(min)</th><th>U/hr</th></tr>`;
-    for (const b of profile.basalSchedule) {
-      const hh = String(Math.floor(b.minutes / 60)).padStart(2, "0");
-      const mm = String(b.minutes % 60).padStart(2, "0");
-      tbl += `<tr><td>${hh}:${mm}</td><td>${b.minutes}</td><td>${round(b.value, 2)}</td></tr>`;
+    let tbl = `<h3>基础率表</h3><table><tr><th>时间</th><th>时长(hrs)</th><th>U/hr</th></tr>`;
+    const bs = profile.basalSchedule.slice().sort((a,b) => (a.timeAsSeconds||0) - (b.timeAsSeconds||0));
+    for (let i = 0; i < bs.length; i++) {
+      const b = bs[i];
+      const sec = b.timeAsSeconds || 0;
+      const nextSec = (i+1 < bs.length ? (bs[i+1].timeAsSeconds||86400) : 86400);
+      const hh = String(Math.floor(sec/3600)).padStart(2,"0");
+      const mm = String(Math.floor((sec%3600)/60)).padStart(2,"0");
+      const hrs = ((nextSec - sec)/3600).toFixed(2);
+      tbl += `<tr><td>${hh}:${mm}</td><td>${hrs}</td><td>${round(b.value, 2)}</td></tr>`;
     }
     tbl += `</table>`;
     content.innerHTML += tbl;

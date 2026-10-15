@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Boost DynISF 计算器 — Nightscout 版</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel2: #334155;
+    --text: #e2e8f0; --dim: #94a3b8; --accent: #38bdf8;
+    --ok: #22c55e; --warn: #f59e0b; --danger: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.55;
+  }
+  h1, h2, h3 { margin: 0 0 12px; }
+  h1 { font-size: 22px; color: var(--accent); }
+  h2 { font-size: 16px; border-left: 3px solid var(--accent); padding-left: 8px; margin-top: 18px; }
+  h3 { font-size: 14px; color: var(--dim); margin-top: 14px; }
+  .panel {
+    background: var(--panel); border-radius: 10px; padding: 16px 18px;
+    margin-bottom: 16px; border: 1px solid rgba(56,189,248,0.15);
+  }
+  .grid { display: grid; gap: 10px; }
+  .g2 { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .g3 { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  label { font-size: 12px; color: var(--dim); display: block; margin-bottom: 4px; }
+  input, select {
+    width: 100%; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid var(--panel2); background: #0b1220; color: var(--text);
+    font-size: 14px; outline: none; transition: border-color .15s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  button {
+    padding: 10px 18px; border-radius: 6px; border: none; cursor: pointer;
+    background: var(--accent); color: #0b1220; font-weight: 600; font-size: 14px;
+    transition: transform .08s, opacity .15s;
+  }
+  button:hover:not(:disabled) { transform: translateY(-1px); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .secondary { background: var(--panel2); color: var(--text); }
+  .btn-row { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .result-card {
+    background: linear-gradient(135deg, rgba(56,189,248,.12), rgba(34,197,94,.08));
+    border: 1px solid rgba(56,189,248,.3); border-radius: 10px;
+    padding: 18px 22px; text-align: center;
+  }
+  .big-num { font-size: 38px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .sub-label { font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .kv { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--panel2); font-size: 13px; }
+  .kv:last-child { border-bottom: none; }
+  .kv .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .danger { color: var(--danger); }
+  pre {
+    background: #0b1220; border-radius: 6px; padding: 12px 14px;
+    font-size: 12.5px; overflow-x: auto; white-space: pre-wrap;
+    max-height: 400px; overflow-y: auto; font-family: "JetBrains Mono", ui-monospace, monospace;
+    border: 1px solid var(--panel2);
+  }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.ok { background: rgba(34,197,94,.18); color: var(--ok); }
+  .badge.warn { background: rgba(245,158,11,.18); color: var(--warn); }
+  .badge.danger { background: rgba(239,68,68,.18); color: var(--danger); }
+  .badge.info { background: rgba(56,189,248,.18); color: var(--accent); }
+  .section-title { display: flex; justify-content: space-between; align-items: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--panel2); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: 500; }
+  .toggle-input { display: flex; align-items: center; gap: 8px; padding: 10px 0; }
+  .toggle-input input[type="checkbox"] { width: 18px; height: 18px; }
+  .toggle-input label { margin: 0; font-size: 14px; color: var(--text); }
+  .note { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<h1>🧮 Boost DynISF 计算器</h1>
+<div class="note">
+  复刻自 AAPS Boost V5 <code>OpenAPSBoostPlugin.computeBoostIsf()</code> 的完整 ISF 计算链路。
+  数据直接从你的 Nightscout 拉取 — 输入 NS 地址，一键算出 Boost 应该给你的动态 ISF。
+</div>
+
+<!-- ======= 1. 连接 NS ======= -->
+<div class="panel">
+  <div class="section-title"><h2>① Nightscout 连接</h2>
+    <span id="ns-status" class="badge">未连接</span></div>
+
+  <div class="grid g2">
+    <div>
+      <label>NS URL</label>
+      <input id="ns-url" placeholder="https://your-site.herokuapp.com">
+    </div>
+    <div>
+      <label>API Secret（只读不需要，有 secrets.txt 也可以）</label>
+      <input id="ns-secret" placeholder="留空也可以">
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button id="btn-connect" onclick="fetchAll()">🔌 拉取数据</button>
+    <button class="secondary" onclick="loadSample()">📋 用示例数据（无需 NS）</button>
+  </div>
+
+  <div id="ns-info" class="note hidden"></div>
+</div>
+
+<!-- ======= 2. Profile 概览 ======= -->
+<div id="profile-panel" class="panel hidden">
+  <h2>② Profile 概览（来自 Nightscout）</h2>
+  <div id="profile-content" class="grid g3"></div>
+</div>
+
+<!-- ======= 3. 设置 ======= -->
+<div class="panel">
+  <h2>③ Boost DynISF 设置</h2>
+
+  <div class="toggle-input">
+    <input type="checkbox" id="use-tdd" checked>
+    <label for="use-tdd">✅ 启用 TDD-based DynISF（关闭则只看 profile ISF）</label>
+  </div>
+
+  <div class="toggle-input">
+    <input type="checkbox" id="adjust-sens" checked>
+    <label for="adjust-sens">📈 启用 Sensitivity Adjustment（24H/7D 趋势调节）</label>
+  </div>
+
+  <div class="grid g3">
+    <div>
+      <label>DynISF Velocity（曲线强度 %）</label>
+      <input id="dyn-velocity" type="number" value="100" step="5" min="0" max="200">
+    </div>
+    <div>
+      <label>DynISF Normal Target (mg/dL)</label>
+      <input id="dyn-target" type="number" value="100">
+    </div>
+    <div>
+      <label>DynISF BG Cap (mg/dL)</label>
+      <input id="dyn-bgcap" type="number" value="220">
+    </div>
+    <div>
+      <label>DynISF Adjustment Factor (%)</label>
+      <input id="dyn-adj" type="number" value="100" step="1">
+    </div>
+    <div>
+      <label>Autosens Min</label>
+      <input id="autosens-min" type="number" value="0.7" step="0.05" min="0.5" max="1.0">
+    </div>
+    <div>
+      <label>Autosens Max</label>
+      <input id="autosens-max" type="number" value="1.3" step="0.05" min="1.0" max="2.0">
+    </div>
+    <div>
+      <label>当前 BG (mg/dL)</label>
+      <input id="cur-bg" type="number" value="140">
+    </div>
+    <div>
+      <label>目标 BG (mg/dL) — Temp Target</label>
+      <input id="target-bg" type="number" value="100">
+    </div>
+    <div>
+      <label>Profile ISF (mg/dL/U) — 来自 Profile</label>
+      <input id="profile-isf" type="number" value="100" readonly>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button onclick="compute()">🧮 计算 DynISF</button>
+  </div>
+</div>
+
+<!-- ======= 4. 结果 ======= -->
+<div id="result-panel" class="panel hidden">
+  <h2>④ 计算结果</h2>
+  <div class="row" style="align-items:stretch;">
+    <div class="result-card" style="flex:1; min-width:200px;">
+      <div class="big-num" id="r-final-isf">—</div>
+      <div class="sub-label">Boost 最终 Dynamic ISF (mg/dL/U)</div>
+    </div>
+    <div class="result-card" style="flex:1; min-width:200px;">
+      <div class="big-num" id="r-target-isf">—</div>
+      <div class="sub-label">ISF @ 目标血糖处（曲线起点）</div>
+    </div>
+    <div class="result-card" style="flex:1; min-width:200px;">
+      <div class="big-num" id="r-profile-isf">—</div>
+      <div class="sub-label">Profile 固定 ISF（对比）</div>
+    </div>
+  </div>
+
+  <div class="grid g2" style="margin-top:14px;">
+    <div>
+      <h3>TDD 多窗口（U/day）</h3>
+      <div id="tdd-table"></div>
+    </div>
+    <div>
+      <h3>计算链路</h3>
+      <div id="calc-kvs"></div>
+    </div>
+  </div>
+
+  <h3>🔍 完整 Debug 日志（逐行复刻 AAPS）</h3>
+  <pre id="debug-log"></pre>
+</div>
+
+<!-- ======= 5. 手动输入 TDD（如果 NS 拉不到） ======= -->
+<div class="panel">
+  <h2>⑤ 手动输入模式（NS 有 CORS 或数据不足时用）</h2>
+  <div class="grid g3">
+    <div>
+      <label>TDD 7D 平均 (U)</label>
+      <input id="m-7d" type="number" step="0.1" value="40">
+    </div>
+    <div>
+      <label>TDD 1D 平均 (U)</label>
+      <input id="m-1d" type="number" step="0.1" value="45">
+    </div>
+    <div>
+      <label>TDD 最近 24H (U)</label>
+      <input id="m-24h" type="number" step="0.1" value="48">
+    </div>
+    <div>
+      <label>TDD 最近 4H (U)</label>
+      <input id="m-4h" type="number" step="0.1" value="9">
+    </div>
+    <div>
+      <label>TDD 8-4H 前 (U)</label>
+      <input id="m-8to4" type="number" step="0.1" value="8">
+    </div>
+    <div>
+      <label>Profile 隐含 TDD (1800/ISF)</label>
+      <input id="m-implied" type="number" step="0.1" readonly>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button onclick="computeManual()">🖊️ 手动 TDD 计算</button>
+  </div>
+</div>
+
+<div class="note">
+  ⚠️ 本工具不存储任何数据，不发送到任何后端。所有计算在你浏览器本地完成。<br>
+  🎯 公式来源：AAPS 4.3.1 Boost V5 <code>OpenAPSBoostPlugin.computeBoostIsf()</code> + <code>TddCalculatorImpl</code> + <code>DetermineBasalBoostV5</code>。
+</div>
+
+<script>
+/* ==========================================================
+   Boost DynISF 计算器 —— 前端完整复刻
+   ========================================================== */
+
+/* ----- 工具函数 ----- */
+const round = (n, dp=1) => {
+  if (n === null || n === undefined || isNaN(n)) return "null";
+  const f = Math.pow(10, dp);
+  return (Math.round(n * f) / f).toFixed(dp);
+};
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const DIVISOR = 100;       // insulinDivisor (U100)
+const TDD_MIN_TDD_FRACTION = 0.35;  // 灾难防御
+
+/* ----- NS API 封装 ----- */
+const NS = {
+  async get(url, secret) {
+    const headers = { "Accept": "application/json" };
+    if (secret) headers["api-secret"] = secret;
+    const r = await fetch(url, { headers });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  },
+  async fetchTreatments(base, secret, sinceMs, untilMs) {
+    const url = `${base.replace(/\/+$/, "")}/api/v1/treatments.json` +
+      `?find[created_at][$gte]=${new Date(sinceMs).toISOString()}` +
+      `&find[created_at][$lte]=${new Date(untilMs).toISOString()}` +
+      `&count=10000`;
+    return this.get(url, secret);
+  },
+  async fetchProfile(base, secret) {
+    const url = `${base.replace(/\/+$/, "")}/api/v1/profile.json`;
+    return this.get(url, secret);
+  },
+  async fetchEntries(base, secret, sinceMs, untilMs) {
+    const url = `${base.replace(/\/+$/, "")}/api/v1/entries.json` +
+      `?find[date][$gte]=${sinceMs}` +
+      `&find[date][$lte]=${untilMs}` +
+      `&sort[date]=1&count=1000`;
+    return this.get(url, secret);
+  },
+  async fetchDeviceStatus(base, secret, sinceMs, untilMs) {
+    const url = `${base.replace(/\/+$/, "")}/api/v1/devicestatus.json` +
+      `?find[created_at][$gte]=${new Date(sinceMs).toISOString()}` +
+      `&find[created_at][$lte]=${new Date(untilMs).toISOString()}` +
+      `&count=2000`;
+    return this.get(url, secret);
+  },
+};
+
+/* ====== TDD 计算引擎（复刻 TddCalculatorImpl + OpenAPSBoostPlugin） ====== */
+
+/*
+ * 将 NS treatments 转换为 AAPS 内部模型，然后按 5-min tick 累加 basal + bolus
+ * 支持：Bolus, Temp Basal (absolute/relative), Carbs, Extended Bolus (NS "Bolus" with duration)
+ * 不支持：Extended Bolus via Loop/APS "BolusWizardEstimate" 标记的（忽略）
+ */
+
+function parseTreatments(nsTreatments) {
+  const boluses = [];     // { ts, amount }
+  const tempBasals = []; // { startTs, endTs, absoluteRate }  单位 U/hr
+  const carbs = [];       // { ts, amount }
+
+  for (const t of nsTreatments) {
+    const ts = new Date(t.created_at || t.date).getTime();
+    if (isNaN(ts)) continue;
+
+    if (t.eventType === "Bolus") {
+      if (!t.insulin || t.insulin <= 0) continue;
+      // NS "Bolus" 有时是延长餐时（带 duration）
+      if (t.duration && t.duration > 0) {
+        // 延长餐时：按 duration 摊到时间轴
+        const rate = t.insulin / (t.duration / 60);  // U/hr
+        tempBasals.push({ startTs: ts, endTs: ts + t.duration * 60000, absoluteRate: rate, fromBolus: true });
+      } else {
+        boluses.push({ ts, amount: t.insulin });
+      }
+    } else if (t.eventType === "Temp Basal") {
+      if (!t.duration || t.duration <= 0) continue;
+      let absRate = t.absolute;
+      if (!absRate || absRate <= 0) {
+        // relative — 拿基础率 profile 算绝对
+        // 这里暂时留空，后面算 tick 的时候用 profile 基础率
+        // 先记录 relative，后面算
+        tempBasals.push({ startTs: ts, endTs: ts + t.duration * 60000, relativeRate: t.relative });
+      } else {
+        tempBasals.push({ startTs: ts, endTs: ts + t.duration * 60000, absoluteRate: absRate });
+      }
+    } else if (t.eventType === "Carbs") {
+      if (!t.carbs || t.carbs <= 0) continue;
+      carbs.push({ ts, amount: t.carbs });
+    }
+    // 其他 eventType（Profile Switch, Note, Site Change, Sensor Change 等）忽略
+  }
+  return { boluses, tempBasals, carbs };
+}
+
+/*
+ * 构建 basal schedule 查找函数：给定 timestamp 返回 profile 基础率 (U/hr)
+ */
+function buildBasalLookup(basalSchedule /* [{start, minutes, value}] */) {
+  if (!basalSchedule || basalSchedule.length === 0) return () => 0;
+  const sched = basalSchedule.slice().sort((a, b) => a.minutes - b.minutes);
+  // AAPS 的 basal schedule 是"绝对时间点"，minutes = HH*60 + MM 从 0:00 算
+  return (ts) => {
+    const d = new Date(ts);
+    const minutesOfDay = d.getHours() * 60 + d.getMinutes();
+    let rate = 0;
+    for (const e of sched) {
+      if (minutesOfDay >= e.minutes) rate = e.value;
+      else break;
+    }
+    return rate;
+  };
+}
+
+/*
+ * 在给定 timestamp 找当前生效的 temp basal（如果有 absolute rate 就返回）
+ */
+function findTempBasalAt(tempBasals, ts) {
+  let best = null;
+  for (const tb of tempBasals) {
+    if (ts >= tb.startTs && ts < tb.endTs) {
+      // 最近开始的优先级最高
+      if (!best || tb.startTs > best.startTs) best = tb;
+    }
+  }
+  return best;
+}
+
+/*
+ * 计算一个时间区间内的 TDD（每 5 min 一个 tick）
+ * return { basalAmount, bolusAmount, totalAmount, carbs }
+ */
+function calculateInterval(boluses, tempBasals, carbs, basalLookup, startTs, endTs) {
+  // 对齐到 5 分钟边界
+  const aligned = (t) => t - (t % (5 * 60 * 1000));
+  const tick = 5 * 60 * 1000;
+
+  let basalAmount = 0;
+  let bolusAmount = 0;
+
+  // Boluses
+  for (const b of boluses) {
+    if (b.ts >= startTs && b.ts < endTs) bolusAmount += b.amount;
+  }
+
+  // Carbs
+  let totalCarbs = 0;
+  for (const c of carbs) {
+    if (c.ts >= startTs && c.ts < endTs) totalCarbs += c.amount;
+  }
+
+  // Basal 5-min ticks
+  let t = aligned(startTs);
+  const endTick = aligned(endTs);
+  while (t < endTick) {
+    // Temp basal 覆盖
+    const tb = findTempBasalAt(tempBasals, t);
+    let absRate = basalLookup(t); // 默认 profile basal
+
+    if (tb) {
+      if (tb.absoluteRate !== undefined) absRate = tb.absoluteRate;
+      else if (tb.relativeRate !== undefined) absRate = basalLookup(t) * tb.relativeRate;
+    }
+
+    // 5 min 的量 = rate/60 * 5 = rate/12
+    basalAmount += absRate / 12.0;
+    t += tick;
+  }
+
+  return {
+    basalAmount,
+    bolusAmount,
+    totalAmount: basalAmount + bolusAmount,
+    carbs: totalCarbs,
+  };
+}
+
+/*
+ * 从 midnight 算过去 N 天的 daily TDD 数组
+ */
+function calcDailyTDD(boluses, tempBasals, carbs, basalLookup, daysBack) {
+  const now = Date.now();
+  const midnightOf = (t) => {
+    const d = new Date(t);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  };
+
+  const todayMidnight = midnightOf(now);
+  const days = [];
+  for (let i = 1; i <= daysBack; i++) {
+    const start = todayMidnight - i * 86400000;
+    const end = start + 86400000;
+    days.push({
+      day: i,
+      start, end,
+      ...calculateInterval(boluses, tempBasals, carbs, basalLookup, start, end),
+    });
+  }
+  return days;
+}
+
+/*
+ * 计算滑动窗口
+ */
+function calcSlidingTDD(boluses, tempBasals, carbs, basalLookup, hoursBackStart, hoursBackEnd) {
+  const now = Date.now();
+  const start = now + hoursBackStart * 3600000;  // 负数
+  const end = now + hoursBackEnd * 3600000;
+  return calculateInterval(boluses, tempBasals, carbs, basalLookup, start, end);
+}
+
+/* ====== Boost DynISF 主公式（复刻 OpenAPSBoostPlugin.computeBoostIsf） ====== */
+
+function computeBoostDynIsf(opts /* = {
+  boluses, tempBasals, carbs, basalSchedule, profileISF, targetBg,
+  dynVelocity, dynTarget, dynBgCap, dynAdjFactor, autosensMin, autosensMax,
+  curBg, useTdd, adjustSens,
+}*/) {
+  const debug = [];
+  const dlog = (s) => debug.push(s);
+  const DIVISOR = 100; // U100
+
+  const {
+    boluses, tempBasals, carbs, basalSchedule,
+    profileISF, targetBg = 100,
+    dynVelocity = 1.0, dynTarget = 100, dynBgCap = 220, dynAdjFactor = 1.0,
+    autosensMin = 0.7, autosensMax = 1.3,
+    curBg = 140, useTdd = true, adjustSens = true,
+  } = opts;
+
+  const basalLookup = buildBasalLookup(basalSchedule);
+  let sensNormalTarget = profileISF;
+  let ratio = 1.0;
+  let tdd = 0;
+
+  dlog(`═══════════════════════════════════════════════════════`);
+  dlog(`  Boost DynISF Debug (复刻自 OpenAPSBoostPlugin v4.3.1)`);
+  dlog(`═══════════════════════════════════════════════════════`);
+
+  /* ----- 拉 TDD 多窗口 ----- */
+  // 7D 平均 = 过去 7 天的每天 TDD 再平均
+  const daily7 = calcDailyTDD(boluses, tempBasals, carbs, basalLookup, 7);
+  const tdd7D = daily7.reduce((s, d) => s + d.totalAmount, 0) / Math.max(1, daily7.length);
+  const tdd1D = calcDailyTDD(boluses, tempBasals, carbs, basalLookup, 1)[0]?.totalAmount || 0;
+
+  const w24 = calcSlidingTDD(boluses, tempBasals, carbs, basalLookup, -24, 0);
+  const w4 = calcSlidingTDD(boluses, tempBasals, carbs, basalLookup, -4, 0);
+  const w84 = calcSlidingTDD(boluses, tempBasals, carbs, basalLookup, -8, -4);
+  const tddLast24H = w24.totalAmount;
+  const tddLast4H = w4.totalAmount;
+  const tddLast8to4H = w84.totalAmount;
+
+  dlog(`TDD data: 7D=${round(tdd7D)} | 1D=${round(tdd1D)} | 24H=${round(tddLast24H)} | 4H=${round(tddLast4H)} | 8-4H=${round(tddLast8to4H)}`);
+
+  if (!useTdd) {
+    dlog(`\n⚠  TDD-based ISF: 禁用 (profile ISF ${round(profileISF)})`);
+  } else if (tdd7D > 0 && tddLast24H > 0 && tddLast4H > 0 && tddLast8to4H > 0 && tdd1D > 0) {
+
+    /* ----- Blend ----- */
+    const tddWeightedFromLast8H = ((1.4 * tddLast4H) + (0.6 * tddLast8to4H)) * 3;
+    dlog(`\nWeighted8H=${round(tddWeightedFromLast8H)} (4H×1.4 + 8-4H×0.6)×3`);
+
+    let blended;
+    if (tddWeightedFromLast8H < 0.75 * tdd7D) {
+      const adjusted7D = tddWeightedFromLast8H + ((tddWeightedFromLast8H / tdd7D) * (tdd7D - tddWeightedFromLast8H));
+      blended = (adjusted7D * 0.34) + (tdd1D * 0.33) + (tddWeightedFromLast8H * 0.33);
+      dlog(`\nW8H < 75% of 7D → adjusted7D=${round(adjusted7D)} (7D ${round(tdd7D)} pulled toward W8H)`);
+      dlog(`Blend (adjusted7D×0.34 + 1D×0.33 + W8H×0.33)`);
+    } else {
+      blended = (tddWeightedFromLast8H * 0.33) + (tdd7D * 0.34) + (tdd1D * 0.33);
+      dlog(`\nStandard blend (W8H×0.33 + 7D×0.34 + 1D×0.33)`);
+    }
+    dlog(`Blended TDD=${round(blended)}`);
+
+    /* Adjustment Factor */
+    tdd = blended * dynAdjFactor;
+    dlog(`Final TDD=${round(tdd)} (adj factor ${Math.round(dynAdjFactor*100)}%)`);
+
+    /* ----- 灾难防御：implausible TDD guard ----- */
+    const impliedTdd = profileISF > 0 ? 1800.0 / profileISF : 0;
+    const tddImplausible = profileISF > 0 && tdd < impliedTdd * TDD_MIN_TDD_FRACTION;
+    dlog(`\nImplied TDD (1800/profileISF)=${round(impliedTdd)} → guard=${round(impliedTdd*TDD_MIN_TDD_FRACTION)}`);
+
+    const logTerm = Math.log((dynTarget / DIVISOR) + 1.0);
+
+    if (tddImplausible) {
+      dlog(`\n⚠  dynISF=PROFILE-FALLBACK: TDD ${round(tdd)} U/day is below ${round(impliedTdd*TDD_MIN_TDD_FRACTION)} (35% of the ${round(impliedTdd)} implied by profile ISF ${round(profileISF)}) — insulin history looks incomplete; using profile ISF`);
+    }
+
+    if (tdd > 0 && logTerm > 0 && !tddImplausible) {
+      sensNormalTarget = 1800.0 / (tdd * logTerm);
+      dlog(`\nTDD ISF @target: ${round(sensNormalTarget)} mg/dL/U (profile was ${round(profileISF)})`);
+
+      /* ----- 24H/7D 灵敏度调节 ----- */
+      if (adjustSens && tddLast24H > 0) {
+        ratio = clamp(tddLast24H / tdd7D, autosensMin, autosensMax);
+        sensNormalTarget = sensNormalTarget / ratio;
+        dlog(`\nSens ratio: ${round(ratio, 3)} (24H/7D = ${round(tddLast24H)}/${round(tdd7D)}) → ISF=${round(sensNormalTarget)}`);
+      }
+    } else {
+      dlog(`\n⚠  TDD calculation produced invalid values (tdd=${round(tdd)}, logTerm=${round(logTerm, 3)}) — using profile ISF`);
+    }
+  } else {
+    dlog(`\n⚠  TDD data incomplete — using profile ISF (7D=${round(tdd7D, 1)})`);
+  }
+
+  /* ----- Variable ISF（曲线）----- */
+  const bgCap = dynBgCap;
+  const bgCurrent = curBg > bgCap ? bgCap + (curBg - bgCap) / 3.0 : curBg;
+  const sbg = Math.log((bgCurrent / DIVISOR) + 1.0);
+  const scaler = Math.log((dynTarget / DIVISOR) + 1.0) / sbg;
+  const variableSens = sensNormalTarget * (1 - (1 - scaler) * dynVelocity);
+
+  dlog(`\nVariable ISF @ BG ${round(curBg)}: ${round(variableSens)} (velocity=${(dynVelocity*100).toFixed(1)}%)`);
+  dlog(`  bgCurrent=${round(bgCurrent)} | scaler=${round(scaler, 3)} | sensNormalTarget=${round(sensNormalTarget)}`);
+  dlog(`═══════════════════════════════════════════════════════`);
+
+  return {
+    finalISF: variableSens,
+    targetISF: sensNormalTarget,
+    profileISF,
+    ratio,
+    tdd,
+    debug: debug.join("\n"),
+    raw: { tdd7D, tdd1D, tddLast24H, tddLast4H, tddLast8to4H, daily7 },
+  };
+}
+
+/* ====== Profile 解析 ====== */
+function parseNsProfile(nsProfileArr) {
+  if (!nsProfileArr || !Array.isArray(nsProfileArr) || nsProfileArr.length === 0) return null;
+
+  // NS /profile.json 有两种形态：旧版是数组，新版带 units
+  // 先尝试找 active profile
+  let prof = nsProfileArr.find(p => p.active) || nsProfileArr[0];
+  if (!prof) return null;
+
+  // units: "mg/dl" or "mmol"
+  const units = prof.units || "mg/dl";
+  const div = units === "mmol" ? 18.0 : 1.0; // 1 mmol/L ≈ 18 mg/dL
+  const scale = (v) => v ? v * div : v;
+
+  // basal: schedule [{start, minutes, value}]
+  const basal = prof.basal || [];
+
+  // isf/sensitivity: schedule
+  let isfSchedule = prof.sensitivity || prof.sensitivities || [];
+  const profileISF = isfSchedule.length > 0 ? isfSchedule[0].value : 0; // 简化：用第一个时段
+  // 注意：AAPS 按小时选对应时段；HTML 版本简化
+
+  // target
+  let target = null;
+  if (prof.target_high && prof.target_low) target = (prof.target_high + prof.target_low) / 2;
+  else if (prof.target) target = prof.target;
+  if (target) target = scale(target);
+
+  // carb ratio
+  const cr = (prof.carbratio && prof.carbratio.length > 0) ? prof.carbratio[0].value : 0;
+
+  return {
+    basalSchedule: basal,
+    profileISF: scale(profileISF),
+    target,
+    carbRatio: cr,
+    units,
+    basalTotalPerDay: basal.reduce((s, b) => s + b.value * (b.minutes / 60), 0), // 粗略
+  };
+}
+
+/* ====== 主流程 ====== */
+
+let cachedData = null;   // { boluses, tempBasals, carbs, basalSchedule, profileISF, target }
+
+async function fetchAll() {
+  const url = document.getElementById("ns-url").value.trim();
+  const secret = document.getElementById("ns-secret").value.trim();
+
+  if (!url) { alert("请先填 NS URL"); return; }
+
+  const status = document.getElementById("ns-status");
+  const info = document.getElementById("ns-info");
+  status.textContent = "拉取中...";
+  status.className = "badge warn";
+  info.textContent = "";
+  info.classList.remove("hidden");
+
+  try {
+    const now = Date.now();
+    const SINCE_14D = now - 14 * 86400000;
+    const SINCE_1D = now - 1 * 86400000;
+
+    // 并发拉取
+    const [treatments, profileRaw, entriesRaw] = await Promise.all([
+      NS.fetchTreatments(url, secret, SINCE_14D, now),
+      NS.fetchProfile(url, secret).catch(() => null),
+      NS.fetchEntries(url, secret, SINCE_1D, now).catch(() => null),
+    ]);
+
+    // 解析 treatments
+    const parsed = parseTreatments(treatments || []);
+
+    // 解析 profile
+    const profile = profileRaw ? parseNsProfile(profileRaw) : null;
+
+    // entries 取最新 BG
+    let curBg = 0;
+    if (entriesRaw && entriesRaw.length > 0) {
+      const latest = entriesRaw[entriesRaw.length - 1];
+      curBg = latest.sgv || latest.mgdl || (latest.glucose && latest.units === "mmol" ? latest.glucose * 18 : latest.glucose);
+    }
+    if (profile?.units === "mmol" && curBg < 40) curBg *= 18; // 可能是 mmol 没转
+    document.getElementById("cur-bg").value = curBg.toFixed(0);
+
+    if (profile) {
+      document.getElementById("profile-isf").value = profile.profileISF.toFixed(1);
+      document.getElementById("target-bg").value = profile.target ? profile.target.toFixed(0) : 100;
+    }
+
+    cachedData = {
+      ...parsed,
+      basalSchedule: profile?.basalSchedule || [],
+      profileISF: profile?.profileISF || 100,
+      targetBg: profile?.target || 100,
+      units: profile?.units || "mg/dl",
+    };
+
+    // UI 呈现
+    const profPanel = document.getElementById("profile-panel");
+    profPanel.classList.remove("hidden");
+    renderProfile(profile, parsed);
+
+    status.textContent = `✅ 连接成功 (${treatments?.length || 0} 条 treatments)`;
+    status.className = "badge ok";
+    info.innerHTML = `最近 14 天：<b>${parsed.boluses.length}</b> 个 bolus · <b>${parsed.tempBasals.length}</b> 个 temp basal · <b>${parsed.carbs.length}</b> 个 carbs。`;
+
+    // 自动计算一次
+    compute();
+
+  } catch (e) {
+    status.textContent = "❌ 失败";
+    status.className = "badge danger";
+    info.innerHTML = `错误：<b>${e.message}</b><br>
+      <span class="note">常见原因：1) NS URL 格式错  2) NS 禁止 CORS（heroku 部署通常默认允许）  3) 需要 api-secret 但没填  4) 网络不通。</span>`;
+  }
+}
+
+function renderProfile(profile, parsed) {
+  const content = document.getElementById("profile-content");
+  if (!profile) { content.innerHTML = `<div class="note">Profile 没拉到，手填吧</div>`; return; }
+  const rows = [
+    ["Units", profile.units],
+    ["Profile ISF", `${round(profile.profileISF, 1)} mg/dL/U`],
+    ["Target BG", `${profile.target ? round(profile.target, 0) : "?"} mg/dL`],
+    ["Carb Ratio", profile.carbRatio ? `${round(profile.carbRatio, 1)} g/U` : "?"],
+    ["Basal 表 (24h 总量)", `${round(profile.basalTotalPerDay, 2)} U`],
+    ["Bolus 14d", parsed.boluses.length + " 次"],
+    ["Temp Basal 14d", parsed.tempBasals.length + " 次"],
+    ["Carbs 14d", parsed.carbs.length + " 次"],
+  ].map(([k, v]) => `<div class="kv"><span>${k}</span><span class="v">${v}</span></div>`).join("");
+  content.innerHTML = rows;
+
+  // 更详细的 basal schedule
+  if (profile.basalSchedule.length > 0) {
+    let tbl = `<h3>基础率表</h3><table><tr><th>开始时间</th><th>时长(min)</th><th>U/hr</th></tr>`;
+    for (const b of profile.basalSchedule) {
+      const hh = String(Math.floor(b.minutes / 60)).padStart(2, "0");
+      const mm = String(b.minutes % 60).padStart(2, "0");
+      tbl += `<tr><td>${hh}:${mm}</td><td>${b.minutes}</td><td>${round(b.value, 2)}</td></tr>`;
+    }
+    tbl += `</table>`;
+    content.innerHTML += tbl;
+  }
+}
+
+function loadSample() {
+  // 伪造一组数据：7 天，每天约 40U TDD，最近稍高
+  const boluses = [];
+  const tempBasals = [];
+  const carbs = [];
+  const now = Date.now();
+
+  // basal schedule（标准 T1DM profile）
+  const basalSchedule = [
+    { start: "00:00", minutes: 0,   value: 0.8 },
+    { start: "04:00", minutes: 240, value: 1.0 },
+    { start: "09:00", minutes: 540, value: 1.2 },
+    { start: "14:00", minutes: 840, value: 0.9 },
+    { start: "20:00", minutes: 1200, value: 1.1 },
+  ];
+  // 估算每日 basal: 0-4h: 0.8×4=3.2; 4-9h: 1×5=5; 9-14h: 1.2×5=6; 14-20h: 0.9×6=5.4; 20-24h: 1.1×4=4.4 → 共 24U basal/天
+
+  // 每天几个 bolus + carbs
+  for (let day = 0; day < 14; day++) {
+    const dayStart = now - day * 86400000;
+    const d = new Date(dayStart);
+    // 三个餐时
+    const meals = [
+      { hour: 7,  carbs: 60, insulin: 6.0 },
+      { hour: 12, carbs: 70, insulin: 7.0 },
+      { hour: 18, carbs: 80, insulin: 8.0 },
+    ];
+    for (const m of meals) {
+      const t = new Date(d);
+      t.setHours(m.hour, 15, 0, 0);
+      const ts = t.getTime();
+      carbs.push({ ts, amount: m.carbs });
+      boluses.push({ ts, amount: m.insulin });
+    }
+    // 偶尔一个 correction bolus
+    if (day % 3 === 0) {
+      boluses.push({ ts: dayStart + 15 * 3600000, amount: 2.0 });
+    }
+  }
+  // 今天多加一个 temp basal
+  tempBasals.push({
+    startTs: now - 2 * 3600000,
+    endTs: now + 3 * 3600000,
+    absoluteRate: 1.5,
+  });
+
+  cachedData = { boluses, tempBasals, carbs, basalSchedule, profileISF: 100, targetBg: 100, units: "mg/dl" };
+
+  document.getElementById("ns-url").value = "使用示例数据";
+  document.getElementById("ns-status").textContent = "✅ 示例数据";
+  document.getElementById("ns-status").className = "badge info";
+  document.getElementById("profile-panel").classList.remove("hidden");
+  renderProfile({ basalSchedule, profileISF: 100, target: 100, carbRatio: 10, units: "mg/dl", basalTotalPerDay: 24 }, { boluses, tempBasals, carbs });
+  compute();
+}
+
+/* ====== UI 计算入口 ====== */
+
+function readSettings() {
+  return {
+    useTdd: document.getElementById("use-tdd").checked,
+    adjustSens: document.getElementById("adjust-sens").checked,
+    dynVelocity: parseFloat(document.getElementById("dyn-velocity").value) / 100.0,
+    dynTarget: parseFloat(document.getElementById("dyn-target").value),
+    dynBgCap: parseFloat(document.getElementById("dyn-bgcap").value),
+    dynAdjFactor: parseFloat(document.getElementById("dyn-adj").value) / 100.0,
+    autosensMin: parseFloat(document.getElementById("autosens-min").value),
+    autosensMax: parseFloat(document.getElementById("autosens-max").value),
+    curBg: parseFloat(document.getElementById("cur-bg").value),
+    targetBg: parseFloat(document.getElementById("target-bg").value),
+    profileISF: parseFloat(document.getElementById("profile-isf").value) || 100,
+  };
+}
+
+function compute() {
+  if (!cachedData) { alert("请先 🔌 拉取数据 或 📋 载入示例"); return; }
+
+  const s = readSettings();
+  const result = computeBoostDynIsf({ ...cachedData, ...s });
+
+  // 填 UI
+  document.getElementById("r-final-isf").textContent = round(result.finalISF, 1);
+  document.getElementById("r-target-isf").textContent = round(result.targetISF, 1);
+  document.getElementById("r-profile-isf").textContent = round(result.profileISF, 1);
+  document.getElementById("debug-log").textContent = result.debug;
+
+  // TDD 表
+  const tdd = result.raw;
+  document.getElementById("tdd-table").innerHTML = `
+    <table>
+      <tr><td>7D 平均</td><td class="v">${round(tdd.tdd7D, 1)} U</td></tr>
+      <tr><td>1D 平均</td><td class="v">${round(tdd.tdd1D, 1)} U</td></tr>
+      <tr><td>最近 24H</td><td class="v">${round(tdd.tddLast24H, 1)} U</td></tr>
+      <tr><td>最近 4H</td><td class="v">${round(tdd.tddLast4H, 1)} U</td></tr>
+      <tr><td>8-4H 前</td><td class="v">${round(tdd.tddLast8to4H, 1)} U</td></tr>
+    </table>
+  `;
+
+  // 计算链路
+  const impliedTdd = 1800.0 / s.profileISF;
+  document.getElementById("m-implied").value = round(impliedTdd, 1);
+  document.getElementById("calc-kvs").innerHTML = `
+    <div class="kv"><span>Blended TDD</span><span class="v">${round(result.tdd, 1)} U</span></div>
+    <div class="kv"><span>Implied TDD (1800/ISF)</span><span class="v">${round(impliedTdd, 1)} U</span></div>
+    <div class="kv"><span>Discrepancy</span><span class="v ${result.tdd < impliedTdd * TDD_MIN_TDD_FRACTION ? "danger" : "ok"}">
+      ${round((result.tdd / impliedTdd) * 100, 0)}% of implied
+      ${result.tdd < impliedTdd * TDD_MIN_TDD_FRACTION ? "⚠️ FALLBACK" : "✓"}
+    </span></div>
+    <div class="kv"><span>24H / 7D 比值</span><span class="v">${round((tdd.tddLast24H / tdd.tdd7D), 2)}</span></div>
+    <div class="kv"><span>Sens Ratio (clamped)</span><span class="v">${round(result.ratio, 2)}</span></div>
+    <div class="kv"><span>logTerm (ln(target/100+1))</span><span class="v">${round(Math.log((s.dynTarget/100)+1), 3)}</span></div>
+    <div class="kv"><span>Curve scaler</span><span class="v">${round(Math.log((s.dynTarget/100)+1)/Math.log((s.curBg/100)+1), 3)}</span></div>
+    <div class="kv"><span>Velocity × Curve correction</span><span class="v">${round((1-(1 - Math.log((s.dynTarget/100)+1)/Math.log((s.curBg/100)+1)) * s.dynVelocity), 3)}</span></div>
+  `;
+
+  document.getElementById("result-panel").classList.remove("hidden");
+}
+
+function computeManual() {
+  const s = readSettings();
+  const manual = {
+    tdd7D: parseFloat(document.getElementById("m-7d").value),
+    tdd1D: parseFloat(document.getElementById("m-1d").value),
+    tddLast24H: parseFloat(document.getElementById("m-24h").value),
+    tddLast4H: parseFloat(document.getElementById("m-4h").value),
+    tddLast8to4H: parseFloat(document.getElementById("m-8to4").value),
+  };
+  const impliedTdd = 1800.0 / s.profileISF;
+  document.getElementById("m-implied").value = round(impliedTdd, 1);
+
+  // 把手动输入塞进 cachedData，其他字段用空数组占位（TDD 会被手动覆盖）
+  const fakeCache = { ...(cachedData || { boluses: [], tempBasals: [], carbs: [], basalSchedule: [] }), ...s };
+
+  // 直接用 computeBoostDynIsf 内部逻辑但手动注入 TDD 值
+  runManualWithOverride(s, manual);
+}
+
+function runManualWithOverride(s, manual) {
+  const dlog = (s2) => document.getElementById("debug-log").textContent += s2 + "\n";
+  document.getElementById("debug-log").textContent = "";
+  dlog("═══════════════════════════════════════════════════════");
+  dlog("  Boost DynISF Debug —— 手动 TDD 输入");
+  dlog("═══════════════════════════════════════════════════════");
+
+  const DIVISOR = 100;
+  const tdd7D = manual.tdd7D, tdd1D = manual.tdd1D, tddLast24H = manual.tddLast24H, tddLast4H = manual.tddLast4H, tddLast8to4H = manual.tddLast8to4H;
+  let sensNormalTarget = s.profileISF;
+  let ratio = 1.0;
+
+  dlog(`TDD data: 7D=${round(tdd7D)} | 1D=${round(tdd1D)} | 24H=${round(tddLast24H)} | 4H=${round(tddLast4H)} | 8-4H=${round(tddLast8to4H)}`);
+
+  if (s.useTdd && tdd7D > 0) {
+    const tddWeightedFromLast8H = ((1.4 * tddLast4H) + (0.6 * tddLast8to4H)) * 3;
+    dlog(`\nWeighted8H=${round(tddWeightedFromLast8H)} (4H×1.4 + 8-4H×0.6)×3`);
+
+    let blended;
+    if (tddWeightedFromLast8H < 0.75 * tdd7D) {
+      const adjusted7D = tddWeightedFromLast8H + ((tddWeightedFromLast8H / tdd7D) * (tdd7D - tddWeightedFromLast8H));
+      blended = (adjusted7D * 0.34) + (tdd1D * 0.33) + (tddWeightedFromLast8H * 0.33);
+      dlog(`\nW8H < 75% of 7D → adjusted7D=${round(adjusted7D)}`);
+    } else {
+      blended = (tddWeightedFromLast8H * 0.33) + (tdd7D * 0.34) + (tdd1D * 0.33);
+    }
+    dlog(`Blended TDD=${round(blended)}`);
+
+    let tdd = blended * s.dynAdjFactor;
+    dlog(`Final TDD=${round(tdd)} (adj factor ${Math.round(s.dynAdjFactor*100)}%)`);
+
+    const impliedTdd = 1800.0 / s.profileISF;
+    const tddImplausible = tdd < impliedTdd * TDD_MIN_TDD_FRACTION;
+
+    const logTerm = Math.log((s.dynTarget / DIVISOR) + 1.0);
+    if (tddImplausible) {
+      dlog(`\n⚠  dynISF=PROFILE-FALLBACK: TDD ${round(tdd)} < ${round(impliedTdd*TDD_MIN_TDD_FRACTION)} (35% of ${round(impliedTdd)} implied by profile ISF)`);
+    }
+    if (tdd > 0 && logTerm > 0 && !tddImplausible) {
+      sensNormalTarget = 1800.0 / (tdd * logTerm);
+      dlog(`\nTDD ISF @target: ${round(sensNormalTarget)} mg/dL/U (profile was ${round(s.profileISF)})`);
+      if (s.adjustSens && tddLast24H > 0) {
+        ratio = clamp(tddLast24H / tdd7D, s.autosensMin, s.autosensMax);
+        sensNormalTarget = sensNormalTarget / ratio;
+        dlog(`\nSens ratio: ${round(ratio,3)} (24H/7D) → ISF=${round(sensNormalTarget)}`);
+      }
+    }
+  }
+
+  const bgCap = s.dynBgCap;
+  const bgCurrent = s.curBg > bgCap ? bgCap + (s.curBg - bgCap) / 3.0 : s.curBg;
+  const scaler = log((s.dynTarget / DIVISOR) + 1.0) / Math.log((bgCurrent / DIVISOR) + 1.0);
+  const variableSens = sensNormalTarget * (1 - (1 - scaler) * s.dynVelocity);
+
+  dlog(`\nVariable ISF @ BG ${round(s.curBg)}: ${round(variableSens)} (velocity=${(s.dynVelocity*100).toFixed(1)}%)`);
+  dlog("═══════════════════════════════════════════════════════");
+
+  // 复用 UI
+  document.getElementById("r-final-isf").textContent = round(variableSens, 1);
+  document.getElementById("r-target-isf").textContent = round(sensNormalTarget, 1);
+  document.getElementById("r-profile-isf").textContent = round(s.profileISF, 1);
+  document.getElementById("result-panel").classList.remove("hidden");
+}
+
+/* ====== 预设填充 ====== */
+(function init() {
+  document.getElementById("m-implied").value = round(1800.0 / 100, 1);
+})();
+</script>
+</body>
+</html>

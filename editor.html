@@ -14,6 +14,9 @@ button.primary{background:#e94560}
 button.primary:hover{background:#ff6b81}
 button.run{background:#27ae60}
 button.run:hover{background:#2ecc71}
+button.copy{background:#3498db}
+button.copy:hover{background:#5dade2}
+button.copy.done{background:#27ae60}
 .splitter{display:flex;height:calc(100vh - 50px);flex-direction:column}
 @media(min-width:800px){.splitter{flex-direction:row}}
 .panel{flex:1;display:flex;flex-direction:column;min-height:300px;min-width:0}
@@ -26,6 +29,7 @@ textarea{flex:1;width:100%;background:#0d1b2a;color:#e0e1dd;border:none;padding:
 <div class="toolbar">
   <h1>📝 Boost DynISF 计算器编辑下载器</h1>
   <button class="run" onclick="runPreview()">▶ 预览</button>
+  <button class="copy" onclick="copyAll()" id="copyBtn">📋 全部复制</button>
   <button class="primary" onclick="download()">💾 下载</button>
 </div>
 <div class="splitter">
@@ -55,6 +59,28 @@ function download(){
   a.download='boost-isf-calc.html';
   document.body.appendChild(a);a.click();document.body.removeChild(a);
   setTimeout(function(){alert('✅ 已下载 boost-isf-calc.html\n\n电脑: 双击打开\n手机: 文件管理器→浏览器打开')},200);
+}
+function copyAll(){
+  var h=document.getElementById('editor').value;
+  var btn=document.getElementById('copyBtn');
+  if(navigator.clipboard){
+    navigator.clipboard.writeText(h).then(function(){
+      btn.textContent='✅ 已复制!';btn.classList.add('done');
+      setTimeout(function(){btn.textContent='📋 全部复制';btn.classList.remove('done')},1500);
+    }).catch(function(){fallbackCopy(h,btn)});
+  }else{
+    fallbackCopy(h,btn);
+  }
+}
+function fallbackCopy(text,btn){
+  var ta=document.createElement('textarea');
+  ta.value=text;ta.style.position='fixed';ta.style.left='-9999px';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.select();ta.setSelectionRange(0,ta.value.length);
+  try{document.execCommand('copy');
+    btn.textContent='✅ 已复制!';btn.classList.add('done');
+    setTimeout(function(){btn.textContent='📋 全部复制';btn.classList.remove('done')},1500);
+  }catch(err){alert('复制失败，请手动选中 textarea 里的代码按 Ctrl+C')}
+  document.body.removeChild(ta);
 }
 document.getElementById('editor').addEventListener('input',function(){
   document.getElementById('cc').textContent='长度: '+this.value.length;
